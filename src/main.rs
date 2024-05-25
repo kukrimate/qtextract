@@ -42,7 +42,7 @@ struct SignatureDefinition {
     id: i32,
     x64: bool,
     signature: &'static [(u8, bool)],
-    extractor: fn(offset: usize, bytes: &[u8], pe: &PE) -> QtResourceInfo
+    extractor: fn(offset: usize, bytes: &[u8], pe: &PE) -> Option<QtResourceInfo>
 }
 
 impl SignatureDefinition {
@@ -106,29 +106,33 @@ impl GoblinPEExtensions for PE<'_> {
     }
 }
 
-fn x86_extract(offset: usize, bytes: &[u8], pe: &PE) -> QtResourceInfo {
+fn x86_extract(offset: usize, bytes: &[u8], pe: &PE) -> Option<QtResourceInfo> {
     let mut offsets = [0usize; 3];
     assert!(bytes.len() >= 17);
 
     let mut stream = BinaryReader::new(bytes);
     for i in 0..3 {
         stream.skip(1); // skip 0x68 (push)
-        offsets[i] = pe.find_offset(stream.read_u32::<false>().unwrap() as usize - pe.image_base).expect("bad rva in extractor");
+        if let Some(offset) = pe.find_offset(stream.read_u32::<false>().unwrap() as usize - pe.image_base) {
+            offsets[i] = offset;
+        } else {
+            return None;
+        }
     }
     stream.skip(1); // skip 0x6A (push)
     let version = stream.read_byte().unwrap() as usize;
 
-    QtResourceInfo {
+    Some(QtResourceInfo {
         signature_id: -1,
         registrar: offset,
         data: offsets[0],
         name: offsets[1],
         tree: offsets[2],
         version
-    }
+    })
 }
 
-fn x64_extract(bytes_offset: usize, bytes: &[u8], pe: &PE) -> QtResourceInfo {
+fn x64_extract(bytes_offset: usize, bytes: &[u8], pe: &PE) -> Option<QtResourceInfo> {
     assert!(bytes.len() >= 31);
     let bytes_rva = pe.find_rva(bytes_offset).unwrap();
     let mut stream = BinaryReader::new_at(bytes, 4);
@@ -142,14 +146,14 @@ fn x64_extract(bytes_offset: usize, bytes: &[u8], pe: &PE) -> QtResourceInfo {
     stream.skip(3);
     let tree = pe.find_offset(stream.read_u32::<false>().unwrap() as usize + bytes_rva + stream.position()).unwrap();
     
-    QtResourceInfo {
+    Some(QtResourceInfo {
         signature_id: -1,
         registrar: bytes_offset,
         data,
         name,
         tree,
         version
-    }
+    })
 }
 
 static TEXT_SIGNATURES: &[SignatureDefinition] = &[
@@ -184,14 +188,14 @@ static TEXT_SIGNATURES: &[SignatureDefinition] = &[
             stream.skip(1);
             let version = stream.read_u32::<false>().unwrap() as usize;
 
-            QtResourceInfo {
+            Some(QtResourceInfo {
                 signature_id: -1,
                 registrar: bytes_offset,
                 data: result[0],
                 name: result[1],
                 tree: result[2],
                 version
-            }
+            })
         }
     },
     SignatureDefinition {
@@ -233,7 +237,7 @@ fn do_scan(buffer: &[u8], start: usize, end: usize, pe: &PE) -> Vec<QtResourceIn
     for def in TEXT_SIGNATURES {
         if def.x64 == pe.is_64 {
             for fo in def.scan_all(buffer, start, end) {
-                let mut info = (def.extractor)(fo, &buffer[fo..fo+def.signature.len()], pe);
+                let Some(mut info) = (def.extractor)(fo, &buffer[fo..fo+def.signature.len()], pe) else { continue };
                 if !seen.contains(&info.data) {
                     seen.insert(info.data);
                     info.signature_id = def.id;
